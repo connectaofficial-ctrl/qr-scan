@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QR受付</title>
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+  <style>
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+    body{font-family:'Segoe UI','Hiragino Sans',sans-serif;background:#f1f5f9;color:#1e293b;}
+    .header{background:#2563eb;color:#fff;padding:0 16px;height:56px;display:flex;align-items:center;justify-content:space-between;}
+    .header__title{font-size:1.1rem;font-weight:700;}
+    .container{max-width:480px;margin:0 auto;padding:24px 16px;}
+    .card{background:#fff;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);padding:16px;margin-bottom:20px;border:1px solid #e2e8f0;}
+    .scan-viewport{width:100%;aspect-ratio:1;border-radius:12px;overflow:hidden;background:#000;position:relative;}
+    .scan-viewport video{width:100%;height:100%;object-fit:cover;}
+    .scan-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;}
+    .scan-frame{width:200px;height:200px;border:3px solid rgba(255,255,255,.8);border-radius:12px;box-shadow:0 0 0 2000px rgba(0,0,0,.4);}
+    .scan-status{text-align:center;padding:12px;border-radius:8px;font-size:1rem;font-weight:600;margin-top:12px;min-height:48px;display:flex;align-items:center;justify-content:center;gap:8px;}
+    .scan-status.idle{background:#f1f5f9;color:#64748b;}
+    .scan-status.ok{background:#dcfce7;color:#16a34a;}
+    .scan-status.error{background:#fee2e2;color:#dc2626;}
+    .btn{display:inline-flex;align-items:center;justify-content:center;padding:10px 20px;border-radius:8px;font-size:.9rem;font-weight:600;cursor:pointer;border:none;transition:all .2s;}
+    .btn-primary{background:#2563eb;color:#fff;flex:1;}
+    .btn-outline{background:transparent;border:2px solid #2563eb;color:#2563eb;flex:1;}
+    .btn-row{display:flex;gap:8px;margin-top:12px;}
+    .manual-area{display:flex;gap:8px;margin-top:12px;}
+    .form-control{width:100%;padding:10px 14px;border:1.5px solid #e2e8f0;border-radius:8px;font-size:.95rem;flex:1;}
+    .cache-bar{background:#f0f9ff;border:1px solid #bae6fd;border-radius:6px;padding:8px 14px;font-size:.8rem;color:#0369a1;margin-bottom:12px;display:flex;align-items:center;gap:8px;}
+    .cache-dot{width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block;}
+    .history-list{max-height:220px;overflow-y:auto;margin-top:8px;}
+    .history-item{display:flex;justify-content:space-between;padding:8px 4px;border-bottom:1px solid #e2e8f0;font-size:.85rem;}
+    .history-item:last-child{border-bottom:none;}
+    .time{color:#64748b;font-size:.75rem;}
+    .overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;z-index:300;}
+    .result-card{background:#fff;border-radius:20px;padding:40px 32px;text-align:center;max-width:300px;width:90%;}
+    .result-card.success{border-top:6px solid #16a34a;}
+    .result-card.error{border-top:6px solid #dc2626;}
+    .result-icon{font-size:5rem;margin-bottom:12px;}
+    .result-name{font-size:1.5rem;font-weight:800;margin-bottom:8px;}
+    .result-sub{color:#64748b;font-size:.9rem;}
+  </style>
+</head>
+<body>
+
+<header class="header">
+  <span class="header__title">📷 QR受付</span>
+  <span id="status-badge" style="font-size:.8rem;opacity:.8;"></span>
+</header>
+
+<div class="container">
+
+  <div class="cache-bar" id="cache-bar" style="display:none;">
+    <span class="cache-dot"></span>
+    <span id="cache-info"></span>
+  </div>
+
+  <div class="card">
+    <div class="scan-viewport">
+      <video id="video" playsinline muted></video>
+      <canvas id="canvas" style="display:none;"></canvas>
+      <div class="scan-overlay"><div class="scan-frame"></div></div>
+    </div>
+
+    <div class="scan-status idle" id="scan-status">
+      📷 カメラを起動してください
+    </div>
+
+    <div class="btn-row">
+      <button id="btn-start" class="btn btn-primary">📷 カメラを起動</button>
+      <button id="btn-stop"  class="btn btn-outline" style="display:none;">⏹ 停止</button>
+    </div>
+
+    <div style="margin-top:16px;">
+      <p style="font-size:.8rem;color:#64748b;margin-bottom:6px;">手動入力</p>
+      <div class="manual-area">
+        <input id="manual-input" class="form-control" type="text" placeholder="ParticipantID|EventID">
+        <button id="btn-manual" class="btn btn-outline" style="flex:none;padding:10px 16px;">送信</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <strong style="font-size:.95rem;">📋 受付履歴</strong>
+    <div class="history-list" id="history-list">
+      <p style="color:#64748b;font-size:.85rem;text-align:center;padding:16px;">まだ受付はありません</p>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  // ★ メインGASのURLをここに貼る
+  const GAS_URL = 'https://script.google.com/macros/s/YOUR_DEPLOY_ID/exec';
+
+  // ============================================================
+  // API通信
+  // ============================================================
+  async function api(action, params) {
+    params = params || {};
+    const res = await fetch(GAS_URL, {
+      method:   'POST',
+      redirect: 'follow',
+      headers:  { 'Content-Type': 'text/plain' },
+      body:     JSON.stringify(Object.assign({ action }, params)),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'エラー');
+    return json.data;
+  }
+
+  // ============================================================
+  // キャッシュ
+  // ============================================================
+  let cache = {};
+  let cacheReady = false;
+
+  async function loadCache() {
+    try {
+      const regs = await api('getAllRegistrations', {});
+      cache = {};
+      regs.forEach(r => { cache[r.ParticipantID + '|' + r.EventID] = r; });
+      cacheReady = true;
+      document.getElementById('cache-bar').style.display = 'flex';
+      document.getElementById('cache-info').textContent = regs.length + ' 件読み込み完了 — 高速モード';
+    } catch(e) { console.warn('Cache failed', e); }
+  }
+
+  // ============================================================
+  // カメラ
+  // ============================================================
+  const video   = document.getElementById('video');
+  const canvas  = document.getElementById('canvas');
+  const ctx     = canvas.getContext('2d');
+  const statusEl= document.getElementById('scan-status');
+
+  let videoStream = null;
+  let scanning    = false;
+  let lastScan    = '';
+  let lastScanTime= 0;
+
+  function setStatus(type, text) {
+    statusEl.className   = 'scan-status ' + type;
+    statusEl.textContent = text;
+  }
+
+  document.getElementById('btn-start').addEventListener('click', async () => {
+    try {
+      videoStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 640 } }
+      });
+      video.srcObject = videoStream;
+      await video.play();
+      document.getElementById('btn-start').style.display = 'none';
+      document.getElementById('btn-stop').style.display  = '';
+      setStatus('idle', '📷 QRコードをかざしてください');
+      scanning = true;
+      requestAnimationFrame(scanFrame);
+    } catch(err) {
+      setStatus('error', '❌ カメラエラー: ' + err.message);
+    }
+  });
+
+  document.getElementById('btn-stop').addEventListener('click', () => {
+    scanning = false;
+    videoStream?.getTracks().forEach(t => t.stop());
+    videoStream = null;
+    video.srcObject = null;
+    document.getElementById('btn-start').style.display = '';
+    document.getElementById('btn-stop').style.display  = 'none';
+    setStatus('idle', '📷 カメラを起動してください');
+  });
+
+  function scanFrame() {
+    if (!scanning) return;
+    requestAnimationFrame(scanFrame);
+    if (video.readyState !== video.HAVE_ENOUGH_DATA) return;
+    canvas.width  = video.videoWidth;
+    canvas.height = video.videoHeight;
+    ctx.drawImage(video, 0, 0);
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const code = jsQR(imageData.data, canvas.width, canvas.height, { inversionAttempts: 'dontInvert' });
+    if (code) {
+      const now = Date.now();
+      if (code.data !== lastScan || now - lastScanTime > 2000) {
+        lastScan = code.data; lastScanTime = now;
+        processQr(code.data);
+      }
+    }
+  }
+
+  // 手動入力
+  document.getElementById('btn-manual').addEventListener('click', () => {
+    const val = document.getElementById('manual-input').value.trim();
+    if (val) processQr(val);
+  });
+  document.getElementById('manual-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') document.getElementById('btn-manual').click();
+  });
+
+  // ============================================================
+  // QR処理
+  // ============================================================
+  let processing = false;
+
+  async function processQr(qrData) {
+    if (processing) return;
+    processing = true;
+    setStatus('idle', '⏳ 処理中…');
+    try {
+      if (cacheReady && !cache[qrData]) throw new Error('NOT_REGISTERED');
+      const result = await api('checkin', { qrData });
+      if (cache[qrData]) cache[qrData].CheckinStatus = 'TRUE';
+      showOverlay(true, result.name, result.rank, result.checkinTime);
+      addHistory('✅ ' + result.name, result.checkinTime);
+      setStatus('ok', '✅ ' + result.name + ' チェックイン完了');
+    } catch(err) {
+      const msg = mapError(err.message);
+      showOverlay(false, null, null, null, msg);
+      addHistory('❌ ' + msg, new Date().toLocaleTimeString());
+      setStatus('error', '❌ ' + msg);
+    }
+    processing = false;
+  }
+
+  function mapError(msg) {
+    if (msg.startsWith('PAYMENT_REQUIRED')) return '支払い未確認';
+    if (msg === 'ALREADY_CHECKED_IN')  return '入場済みです';
+    if (msg === 'NOT_REGISTERED')      return '登録が見つかりません';
+    if (msg === 'INVALID_QR')          return 'QRコードが無効です';
+    return msg;
+  }
+
+  // ============================================================
+  // オーバーレイ
+  // ============================================================
+  function showOverlay(success, name, rank, time, errorMsg) {
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay';
+    const rankLabel = { New:'🌱 New', Bronze:'🥉 Bronze', Silver:'🥈 Silver', Gold:'🥇 Gold', Platinum:'💎 Platinum' };
+    overlay.innerHTML = success
+      ? `<div class="result-card success">
+           <div class="result-icon">✅</div>
+           <div class="result-name">${name}</div>
+           <div class="result-sub">${rankLabel[rank]||rank} &nbsp; ${time||''}</div>
+         </div>`
+      : `<div class="result-card error">
+           <div class="result-icon">❌</div>
+           <div class="result-name" style="font-size:1.2rem;">${errorMsg}</div>
+         </div>`;
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', () => overlay.remove());
+    setTimeout(() => overlay.remove(), 2500);
+  }
+
+  // ============================================================
+  // 履歴
+  // ============================================================
+  const historyEl = document.getElementById('history-list');
+  function addHistory(status, time) {
+    const item = document.createElement('div');
+    item.className = 'history-item';
+    item.innerHTML = `<span>${status}</span><span class="time">${time}</span>`;
+    if (historyEl.children.length === 1 && historyEl.children[0].tagName === 'P') historyEl.innerHTML = '';
+    historyEl.prepend(item);
+  }
+
+  // 起動
+  loadCache();
+</script>
+</body>
+</html>
